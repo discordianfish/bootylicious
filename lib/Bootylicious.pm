@@ -41,6 +41,8 @@ my $config = {
       || 'pages',
     draftsdir => $ENV{BOOTYLICIOUS_DRAFTSDIR}
       || 'drafts',
+    commentsdir => $ENV{BOOTYLICIOUS_COMMENTSDIR}
+      || 'comments',
     publicdir => $ENV{BOOTYLICIOUS_PUBLICDIR}
       || 'public',
     templatesdir => $ENV{BOOTYLICIOUS_TEMPLATESDIR}
@@ -517,13 +519,13 @@ sub get_article {
 
     my $path;
 
-    my ($prev, $next);
+    my ($prev, $next, $basename);
     for (my $i = 0; $i <= $#files; $i++) {
         utf8::decode($files[$i]);
         $prev = $files[$i - 1] if $i > 0;
         $next = $files[$i + 1] if $i <= $#files;
 
-        my $basename = File::Basename::basename($files[$i]);
+        $basename = File::Basename::basename($files[$i]);
         if ($basename =~ m/$timestamp_re/) {
             $path = $files[$i];
             last;
@@ -542,7 +544,10 @@ sub get_article {
         ($pager->{prev}) = _parse_article($prev);
     }
 
-    return (_parse_article($path), $pager);
+    my $article = _parse_article($path);
+    $article->{comments} = get_comments($basename);
+
+    return ($article, $pager);
 }
 
 sub get_draft {
@@ -585,6 +590,20 @@ sub get_page {
     return unless $path && -r $path;
 
     return _parse_article($path);
+}
+
+sub get_comments {
+    my $article = shift;
+    return unless $article;
+
+    my $root =
+    ($config->{commentsdir} =~ m/^\//)
+        ? $config->{commentsdir}
+        : app->home->rel_dir($config->{commentsdir});
+
+    my @files = glob ($root . '/' . $article . '/*.*');
+
+    return [ map { _parse_article($_) } reverse @files ];
 }
 
 sub url {
@@ -737,6 +756,7 @@ sub _parse_article {
         description     => $metadata->{description} || '',
         link            => $metadata->{link} || '',
         tags            => $metadata->{tags} || [],
+        mail            => $metadata->{mail} || '',
         preview         => $preview,
         preview_link    => $preview_link,
         content         => $content,
@@ -1089,6 +1109,19 @@ rkJggg==" alt="RSS" /></a></sup>
       |&nbsp;<a href="<%= url article => $pager->{next} %>"><%= $pager->{next}->{title}%></a> &rarr;
 % }
     </div>
+% if (@{$article->{comments}}) {
+    <div id="comments">
+    <h1>Comments</h1>
+%   foreach my $comment (@{$article->{comments}}) {
+        <div class="comment">
+            <span class="name"><a href="mailto:<%= $comment->{mail} %>"><%= $comment->{title} %><a></span>
+            <span class="link"><a href="<%= $comment->{link} %>">WWW</a></span>
+            <span class="modified"><%= date $comment->{modified}, "%a, %d %b %Y %H:%M" %></span>
+            <div class="text comment"><%== $comment->{content} =%></div>
+        </div>
+%   }
+    </div>
+% }
 </div>
 
 
@@ -1180,6 +1213,7 @@ rkJggg==" alt="RSS" /></a></sup>
             #subfooter {padding:2em;border-top:#000000 1px solid}
             #footer{width:65%;margin:auto;font-size:80%;text-align:center;padding:2em 0em 2em 0em;border-top:#000000 1px solid;height:2em;}
             .push {height:6em}
+            .comment .text {border-top: 1px solid black;border-left: 1px solid black;margin-bottom: 2em;}
         </style>
 % }
         <link rel="alternate" type="application/rss+xml" title="<%= config 'title' %>" href="<%= url_abs 'index', format => 'rss' %>" />

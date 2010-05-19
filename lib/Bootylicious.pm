@@ -12,8 +12,10 @@ use Mojo::JSON;
 use Mojo::Command;
 use Mojo::ByteStream 'b';
 
+use Scalar::Util qw(looks_like_number);
 use Pod::Simple::HTML;
 require File::Basename;
+
 
 $ENV{LANG} = 'C';
 require Time::Piece;
@@ -61,6 +63,7 @@ my $config = {
     meta      => [],
     css       => [],
     js        => [],
+    commentsmarkup => [ 'pod', 'md' ],
     datefmt   => '%a, %d %b %Y',
     strings   => {
         'archive'             => 'Archive',
@@ -350,6 +353,90 @@ get '/drafts/:draftid' => sub {
     $c->render;
 } => 'draft';
 
+post '/comment/:year/:month/:alias' => sub {
+    my $c = shift;
+
+    my %opt = (
+        author => $c->req->param('author') || 'anonymous',
+        mail => $c->req->param('mail') || '',
+        link => $c->req->param('link') || '',
+    );
+    my $content = $c->req->param('content');
+
+    my $article_root =
+        ($config->{articlesdir} =~ m/^\//)
+        ? $config->{articlesdir}
+        : app->home->rel_dir($config->{articlesdir});
+
+    my $year = $c->stash('year');
+    my $month = $c->stash('month');
+    my $alias = $c->stash('alias');
+
+    # sanitizing the input
+    unless (
+        looks_like_number $year &&
+        looks_like_number $month &&
+        $alias !~ m{\.\.|/}
+    ) {
+        app->log->error('sanitization of get parameters failed');
+        $c->render(message => 'Invalid data');
+        return;
+    }
+
+    # removing newlines
+    for my $key (keys %opt)
+    {
+        next unless $opt{$key};
+        $opt{$key} =~ s/\n|\r//g &&
+            app->log->warn("striped newlines from $key");
+    };
+
+    unless ($content) {
+        $c->render(message => 'No comment given');
+        return
+    }
+
+    $opt{link} = "http://$opt{link}"
+        if ($opt{link} and $opt{link} !~ m/^http/);
+
+    $opt{author} = "anonymous" unless $opt{author};
+
+
+    my $markup = (
+        grep { $c->req->param('markup') eq $_ } @{ config('commentsmarkup') }
+    )[0];
+
+    $markup = @{ config('commentsmarkup') }[0] unless $markup;
+    
+
+    unless ($markup) {
+        app->log->warn("Illegal markup '$opt{markup}'");
+        $c->render(message => 'Invalid data');
+        return;
+    }
+
+
+    # app->log->warn("$article_root/$year$month??$alias.*");
+    my @files = glob("$article_root/$year$month??-$alias.*");
+
+    unless (@files)
+    {
+        app->log->warn('No article for comment found');
+        $c->render(message => 'What?');
+        return;
+    }
+
+    if (@files > 1) {
+        app->log->warn('More then one article is available');
+    }
+
+    my $article = File::Basename::basename($files[0]);
+
+    post_comment($article, $content, $markup, \%opt) or die;
+
+    $c->redirect_to('article');
+} => 'comment';
+
 sub theme {
     my $publicdir = app->home->rel_dir($config->{publicdir});
 
@@ -606,6 +693,56 @@ sub get_comments {
     return [ map { _parse_article($_) } reverse @files ];
 }
 
+sub post_comment {
+    my $article = shift;
+    my $content = shift;
+    my $markup = shift;
+    my $opt = shift;
+
+
+    my $root =
+    ($config->{commentsdir} =~ m/^\//)
+        ? $config->{commentsdir}
+        : app->home->rel_dir($config->{commentsdir});
+
+    my $comment_dir = $root .'/'. $article;
+
+    my $t = Time::Piece->localtime;
+   
+    my $pre = $t->strftime($comment_dir .'/%Y%m%d%-H%M%S');
+
+    my ($path, $i);
+    do {
+        $path = sprintf '%s_%02d.'.$markup, $pre, $i++;
+        if ($i>99) {
+           app->log->error('something went terrible wrong');
+           return;
+        }
+    } until (! -e $path);
+
+    unless (-d $comment_dir)
+    {
+        unless (mkdir $comment_dir)
+        {
+            app->log->error("could not mkdir $comment_dir: $!");
+            return
+        }
+    }
+
+    unless (open FILE, '>encoding(UTF-8)', $path)
+    {
+        app->log->error("could not open $path");
+        return
+    }
+
+    for (keys %$opt) {
+        print FILE "$_: $opt->{$_}\n" if $opt->{$_}
+    }
+
+    print FILE "\n", $content;
+    close FILE and return 1;
+}
+
 sub url {
     my $c = shift;
     my $name = shift;
@@ -628,7 +765,7 @@ sub url {
                 alias  => $value->{name},
                 format => 'html'
             )
-        );
+        )
     }
     elsif ($name eq 'tag') {
         return $c->url_for(tag => (tag => $value, format => 'html', @_));
@@ -636,6 +773,15 @@ sub url {
     elsif ($name eq 'pager') {
         return $c->url_for('index', format => 'html')
           . "?timestamp=$value";
+    }
+    elsif ($name eq 'comment') {
+        return $c->url_for(
+            comment => (
+                year   => $value->{year},
+                month  => $value->{month},
+                alias  => $value->{name},
+            )
+        )
     }
 }
 
@@ -756,6 +902,7 @@ sub _parse_article {
         description     => $metadata->{description} || '',
         link            => $metadata->{link} || '',
         tags            => $metadata->{tags} || [],
+        author          => $metadata->{author} || '',
         mail            => $metadata->{mail} || '',
         preview         => $preview,
         preview_link    => $preview_link,
@@ -1109,19 +1256,43 @@ rkJggg==" alt="RSS" /></a></sup>
       |&nbsp;<a href="<%= url article => $pager->{next} %>"><%= $pager->{next}->{title}%></a> &rarr;
 % }
     </div>
-% if (@{$article->{comments}}) {
     <div id="comments">
+    <h1>New Comment</h1>
+    <form action="<%= url comment => $article %>" method="POST">
+        <label for="author">Name</label><input type="text" name="author" /><br/>
+        <label for="mail">Mail</label><input type="text" name="mail" /><br/>
+        <label for="link">Homepage</label><input type="text" name="link" /><br/>
+        <label for="radio">Markup</label>
+% my $i = 'checked'; foreach my $markup (@{ config('commentsmarkup') }) {
+            <input type="radio" name="markup" value="<%= $markup %>" <%= $i %>/> <%= $markup %>
+%   $i = '';
+% }
+        <br/>
+        <label for="content">Comment</label><textarea name="content"></textarea><br/>
+        <input type="submit" /><br/>
+    </form>
+% if (@{$article->{comments}}) {
     <h1>Comments</h1>
 %   foreach my $comment (@{$article->{comments}}) {
         <div class="comment">
-            <span class="name"><a href="mailto:<%= $comment->{mail} %>"><%= $comment->{title} %><a></span>
+            <span class="author">
+% if ($comment->{mail}) {
+                <a href="mailto:<%= $comment->{mail} %>">
+                    <%= $comment->{author} %>
+                </a>
+% } else {
+                <%= $comment->{author} %>
+% }
+            </span>
+% if ($comment->{link}) {
             <span class="link"><a href="<%= $comment->{link} %>">WWW</a></span>
+% }
             <span class="modified"><%= date $comment->{modified}, "%a, %d %b %Y %H:%M" %></span>
             <div class="text comment"><%== $comment->{content} =%></div>
         </div>
 %   }
-    </div>
 % }
+    </div>
 </div>
 
 
@@ -1159,7 +1330,17 @@ rkJggg==" alt="RSS" /></a></sup>
 <h1>500</h1>
 <br />
 <%= strings 'error' %>
+<%= $error %>
 </div>
+
+@@ comment.html.ep
+% stash title => 'Comment', layout => 'wrapper';
+<div class="message">
+<h1>Comment:</h1>
+<br />
+<%= $message %>
+</div>
+
 
 @@ layouts/wrapper.html.ep
 %# $c->res->headers->content_type('text/html; charset=utf-8');
@@ -1206,7 +1387,7 @@ rkJggg==" alt="RSS" /></a></sup>
             .tags{margin-left:10px;text-transform:uppercase;}
             .text {padding:2em;}
             .text h1.title {font-size:2.5em}
-            .error {padding:2em;text-align:center}
+            .error,.message {padding:2em;text-align:center}
             .more {margin-left:10px}
             #pager {text-align:center;padding:2em}
             #pager span.notactive {color:#ccc}
@@ -1214,6 +1395,9 @@ rkJggg==" alt="RSS" /></a></sup>
             #footer{width:65%;margin:auto;font-size:80%;text-align:center;padding:2em 0em 2em 0em;border-top:#000000 1px solid;height:2em;}
             .push {height:6em}
             .comment .text {border-top: 1px solid black;border-left: 1px solid black;margin-bottom: 2em;}
+            #comments label {float:left; width:8em}
+            #comments input[type="text"] {width:20em}
+            #comments textarea {height:8em; width:20em;}
         </style>
 % }
         <link rel="alternate" type="application/rss+xml" title="<%= config 'title' %>" href="<%= url_abs 'index', format => 'rss' %>" />

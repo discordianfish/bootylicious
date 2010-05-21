@@ -1,42 +1,56 @@
-#!/usr/bin/env perl
+package Bootylicious;
 
-BEGIN { use FindBin; unshift @INC, "$FindBin::Bin/mojo/lib" }
+BEGIN { use FindBin; use lib "$FindBin::Bin/mojo/lib" }
 
 use Mojolicious::Lite;
 
-use Mojo::ByteStream 'b';
-use Mojo::Command;
 use Mojo::Date;
-use Mojo::JSON;
-use Mojo::Loader;
 use Mojo::Template;
+use Mojo::ByteStream;
+use Mojo::Loader;
+use Mojo::JSON;
+use Mojo::Command;
+use Mojo::ByteStream 'b';
 
+use Scalar::Util qw(looks_like_number);
+use Pod::Simple::HTML;
 require File::Basename;
+
 
 $ENV{LANG} = 'C';
 require Time::Piece;
 require Time::Local;
 
-use constant MARKDOWN => eval { require Text::Markdown; 1 };
-
 our $VERSION = '0.910102';
 
 my $config = {
-    perl5lib     => '',
-    loglevel     => 'error',
-    server       => 'cgi',
-    author       => 'whoami',
-    email        => '',
-    title        => 'Just another blog',
-    about        => 'Perl hacker',
-    descr        => 'I do not know if I need this',
-    articlesdir  => 'articles',
-    pagesdir     => 'pages',
-    draftsdir    => 'drafts',
-    publicdir    => 'public',
-    templatesdir => 'templates',
-    footer =>
-      'Powered by <a href="http://getbootylicious.org">Bootylicious</a>',
+    perl5lib => '',
+    loglevel => 'debug',
+    server   => 'cgi',
+    author   => $ENV{BOOTYLICIOUS_AUTHOR}
+      || 'whoami',
+    email => $ENV{BOOTYLICIOUS_EMAIL}
+      || '',
+    title => $ENV{BOOTYLICIOUS_TITLE}
+      || 'Just another blog',
+    about => $ENV{BOOTYLICIOUS_ABOUT}
+      || 'Perl hacker',
+    descr => $ENV{BOOTYLICIOUS_DESCR}
+      || 'I do not know if I need this',
+    articlesdir => $ENV{BOOTYLICIOUS_ARTICLESDIR}
+      || 'articles',
+    pagesdir => $ENV{BOOTYLICIOUS_PAGESDIR}
+      || 'pages',
+    draftsdir => $ENV{BOOTYLICIOUS_DRAFTSDIR}
+      || 'drafts',
+    commentsdir => $ENV{BOOTYLICIOUS_COMMENTSDIR}
+      || 'comments',
+    publicdir => $ENV{BOOTYLICIOUS_PUBLICDIR}
+      || 'public',
+    templatesdir => $ENV{BOOTYLICIOUS_TEMPLATESDIR}
+      || 'templates',
+    footer => $ENV{BOOTYLICIOUS_FOOTER}
+      || 'Powered by <a href="http://getbootylicious.org">Bootylicious</a>',
     menu => [
         index   => '/index.html',
         tags    => '/tags.html',
@@ -49,6 +63,7 @@ my $config = {
     meta      => [],
     css       => [],
     js        => [],
+    commentsmarkup => [ 'pod', 'md' ],
     datefmt   => '%a, %d %b %Y',
     strings   => {
         'archive'             => 'Archive',
@@ -64,32 +79,31 @@ my $config = {
         'not-found'           => 'The page you are looking for was not found',
         'error'               => 'Internal error occuried :('
     },
-    template_handler => 'ep',
+    template_handler => 'ep'
 };
 
 app->home->parse($ENV{BOOTYLICIOUS_HOME}) if $ENV{BOOTYLICIOUS_HOME};
 
 _read_config_from_file();
 
-plugin charset => {charset => 'utf-8'};
-plugin 'pod_renderer';
-
 app->log->level($config->{loglevel});
 
 app->renderer->default_handler(config('template_handler'));
 
-app->renderer->add_helper(config   => sub { shift; config(@_) });
-app->renderer->add_helper(date     => \&date);
+app->renderer->add_helper(stash => sub { my $c = shift; $c->stash(@_); });
+app->renderer->add_helper(param => sub { my $c = shift; $c->req->param(@_)});
+app->renderer->add_helper(url => \&url);
+app->renderer->add_helper(url_abs => \&url_abs);
+app->renderer->add_helper(config => sub { shift; config(@_) });
+app->renderer->add_helper(date => \&date);
 app->renderer->add_helper(date_rss => \&date_rss);
-app->renderer->add_helper(url      => \&url);
-app->renderer->add_helper(url_abs  => \&url_abs);
 
 # Helpers for plugins
-#app->renderer->add_helper(get_articles => sub { get_articles(@_) });
+app->renderer->add_helper(get_articles => sub { shift; get_articles(@_) });
 
 app->renderer->add_helper(
     strings => sub {
-        my $self = shift;
+        my $c = shift;
 
         my $string = config('strings')->{$_[0]};
 
@@ -100,6 +114,19 @@ app->renderer->add_helper(
         return $string;
     }
 );
+
+app->plugins->add_hook(
+    before_dispatch => sub {
+        my ($self, $c) = @_;
+
+        # Make the tests happy
+        $c->stash(template_class => __PACKAGE__);
+
+        $c->stash($_ => '') for (qw/title description/);
+    }
+);
+
+plugin charset => {charset => 'utf-8'};
 
 _load_plugins();
 
@@ -116,35 +143,30 @@ sub config {
 ladder sub {
     my $self = shift;
 
-    my $path = $self->req->url->path;
-
     return 1 if $self->stash->{format};
 
-    return 1 unless $path;
+    return 1 unless $self->req->url;
 
-    return 1 if $path =~ m{/$};
+    return 1 if $self->req->url =~ m{/$};
 
-    return 1 if $path =~ m{\.html$};
-
-    my $canonical_location = $self->req->url->clone->path($path . '.html')->to_abs;
+    my $canonical_location = $self->req->url->to_abs . '.html';
 
     $self->app->log->debug("Path is not canonical: " . $self->req->url);
     $self->app->log->debug("Redirecting to: " . $canonical_location);
 
     $self->redirect_to($canonical_location);
 
-    # Stop
     return 0;
 };
 
 sub index {
-    my $self = shift;
+    my $c = shift;
 
-    my $timestamp = $self->req->param('timestamp') || 0;
+    my $timestamp = $c->req->param('timestamp') || 0;
 
     my $article = {};
     my ($articles, $pager) =
-      get_articles($self, limit => $config->{pagelimit}, timestamp => $timestamp);
+      get_articles(limit => $config->{pagelimit}, timestamp => $timestamp);
 
     my $last_created  = time;
     my $last_modified = time;
@@ -154,62 +176,68 @@ sub index {
         $last_created  = $articles->[0]->{created};
         $last_modified = $article->{modified};
 
-        return 1 unless _is_modified($self, $last_modified);
+        return 1 unless _is_modified($c, $last_modified);
     }
 
-    $self->stash(
+    my $later = 0;
+
+    $c->stash(
         article  => $article,
         articles => $articles,
         pager    => $pager
     );
 
-    $self->res->headers->header('Last-Modified' => Mojo::Date->new($last_modified));
+    $c->res->headers->header('Last-Modified' => Mojo::Date->new($last_modified));
 
-    $self->stash(template => 'index');
+    $c->stash(template => 'index');
 
-    if ($self->stash('format') && $self->stash('format') eq 'rss') {
-        $self->stash(
+    if ($c->stash('format') && $c->stash('format') eq 'rss') {
+        $c->stash(
             last_created  => $last_created,
             last_modified => $last_modified,
         );
     }
     else {
-        $self->stash(layout => 'wrapper', title => '');
+        $c->stash(layout => 'wrapper', title => '');
     }
+
+    $c->render;
 }
 
 get '/' => \&index => 'root';
 get '/index' => \&index => 'index';
 
 get '/archive' => sub {
-    my $self = shift;
+    my $c = shift;
 
-    my $root = $self->app->home;
+    my $root = $c->app->home;
 
     my $last_modified = Mojo::Date->new;
 
-    my ($articles) = get_articles($self, limit => 0);
+    my ($articles) = get_articles(limit => 0);
     if (@$articles) {
         $last_modified = $articles->[0]->{modified};
 
-        return 1 unless _is_modified($self, $last_modified);
+        return 1 unless _is_modified($c, $last_modified);
     }
 
-    $self->res->headers->header('Last-Modified' => $last_modified);
+    $c->res->headers->header('Last-Modified' => $last_modified);
 
-    $self->stash(
+    $c->stash(
         layout        => 'wrapper',
         articles      => $articles,
         last_modified => $last_modified,
     );
+
+    $c->render;
 } => 'archive';
 
 get '/tags/:tag' => sub {
-    my $self = shift;
+    my $c = shift;
 
-    my $tag = $self->stash('tag');
+    my $tag = $c->stash('tag');
 
-    my ($articles) = get_articles($self, limit => 0);
+    my ($articles) = get_articles(limit => 0);
 
     $articles = [
         grep {
@@ -218,85 +246,196 @@ get '/tags/:tag' => sub {
           } @$articles
     ];
 
-    return $self->render_not_found unless @$articles;
+    unless (@$articles) {
+        $c->stash(rendered => 1);
+        $c->app->static->serve_404($c);
+        return 1;
+    }
 
     my $last_modified = $articles->[0]->{modified};
-    return 1 unless _is_modified($self, $last_modified);
+    return 1 unless _is_modified($c, $last_modified);
 
-    $self->res->headers->header('Last-Modified' => Mojo::Date->new($last_modified));
+    $c->res->headers->header('Last-Modified' => Mojo::Date->new($last_modified));
 
     my $last_created = $articles->[0]->{created};
 
-    $self->stash(articles => $articles);
+    $c->stash(articles => $articles);
 
-    if ($self->stash('format') && $self->stash('format') eq 'rss') {
-        $self->stash(
+    if ($c->stash('format') && $c->stash('format') eq 'rss') {
+        $c->stash(
             last_modified => $last_modified,
             last_created  => $last_created,
             template      => 'index'
         );
     }
     else {
-        $self->stash(layout => 'wrapper');
+        $c->stash(layout => 'wrapper');
     }
+
+    $c->render;
 } => 'tag';
 
 get '/tags' => sub {
-    my $self = shift;
+    my $c = shift;
 
-    my $tags = get_tags($self);
+    my $tags = get_tags();
 
-    $self->stash(layout => 'wrapper',  tags => $tags);
+    $c->stash(layout => 'wrapper',  tags => $tags);
+
+    $c->render;
 } => 'tags';
 
 get '/articles/:year/:month/:alias' => sub {
-    my $self = shift;
+    my $c = shift;
 
     my $articleid =
-      $self->stash('year') . '/' . $self->stash('month') . '/' . $self->stash('alias');
+      $c->stash('year') . '/' . $c->stash('month') . '/' . $c->stash('alias');
 
-    my ($article, $pager) = get_article($self, $articleid);
-    return $self->render_not_found unless $article;
+    my ($article, $pager) = get_article($articleid);
+    unless ($article) {
+        $c->app->log->debug("Article '$articleid' not found");
+        $c->stash(rendered => 1);
+        $c->app->static->serve_404($c);
+        return 1;
+    }
 
-    return 1 unless _is_modified($self, $article->{modified});
+    return 1 unless _is_modified($c, $article->{modified});
 
-    $self->stash(article => $article, pager => $pager, layout => 'wrapper');
+    $c->stash(article => $article, pager => $pager, layout => 'wrapper');
 
-    $self->res->headers->header(
+    $c->res->headers->header(
         'Last-Modified' => Mojo::Date->new($article->{modified}));
+
+    $c->render;
 } => 'article';
 
 get '/pages/:pageid' => sub {
-    my $self = shift;
+    my $c = shift;
 
-    my $pageid = $self->stash('pageid');
+    my $pageid = $c->stash('pageid');
 
-    my $page = get_page($self, $pageid);
-    return $self->render_not_found unless $page;
+    my $page = get_page($pageid);
+    unless ($page) {
+        $c->stash(rendered => 1);
+        $c->app->static->serve_404($c);
+        return 1;
+    }
 
     #return 1 unless _is_modified($c, $page->{modified});
 
-    $self->stash(layout => 'wrapper', page => $page);
+    $c->stash(layout => 'wrapper', page => $page);
 
-    $self->res->headers->header(
+    $c->res->headers->header(
         'Last-Modified' => Mojo::Date->new($page->{modified}));
+
+    $c->render;
 } => 'page';
 
 get '/drafts/:draftid' => sub {
-    my $self = shift;
+    my $c = shift;
 
-    my $draftid = $self->stash('draftid');
+    my $draftid = $c->stash('draftid');
 
-    my $draft = get_draft($self, $draftid);
-    return $self->render_not_found unless $draft;
+    my $draft = get_draft($draftid);
+    unless ($draft) {
+        $c->stash(rendered => 1);
+        $c->app->static->serve_404($c);
+        return 1;
+    }
 
     #return 1 unless _is_modified($c, $page->{modified});
 
-    $self->stash(layout => 'wrapper', draft => $draft);
+    $c->stash(layout => 'wrapper', draft => $draft);
 
-    $self->res->headers->header(
+    $c->res->headers->header(
         'Last-Modified' => Mojo::Date->new($draft->{modified}));
+
+    $c->render;
 } => 'draft';
+
+post '/comment/:year/:month/:alias' => sub {
+    my $c = shift;
+
+    my %opt = (
+        author => $c->req->param('author') || 'anonymous',
+        mail => $c->req->param('mail') || '',
+        link => $c->req->param('link') || '',
+    );
+    my $content = $c->req->param('content');
+
+    my $article_root =
+        ($config->{articlesdir} =~ m/^\//)
+        ? $config->{articlesdir}
+        : app->home->rel_dir($config->{articlesdir});
+
+    my $year = $c->stash('year');
+    my $month = $c->stash('month');
+    my $alias = $c->stash('alias');
+
+    # sanitizing the input
+    unless (
+        looks_like_number $year &&
+        looks_like_number $month &&
+        $alias !~ m{\.\.|/}
+    ) {
+        app->log->error('sanitization of get parameters failed');
+        $c->render(message => 'Invalid data');
+        return;
+    }
+
+    # removing newlines
+    for my $key (keys %opt)
+    {
+        next unless $opt{$key};
+        $opt{$key} =~ s/\n|\r//g &&
+            app->log->warn("striped newlines from $key");
+    };
+
+    unless ($content) {
+        $c->render(message => 'No comment given');
+        return
+    }
+
+    $opt{link} = "http://$opt{link}"
+        if ($opt{link} and $opt{link} !~ m/^http/);
+
+    $opt{author} = "anonymous" unless $opt{author};
+
+
+    my $markup = (
+        grep { $c->req->param('markup') eq $_ } @{ config('commentsmarkup') }
+    )[0];
+
+    $markup = @{ config('commentsmarkup') }[0] unless $markup;
+    
+
+    unless ($markup) {
+        app->log->warn("Illegal markup '$opt{markup}'");
+        $c->render(message => 'Invalid data');
+        return;
+    }
+
+
+    # app->log->warn("$article_root/$year$month??$alias.*");
+    my @files = glob("$article_root/$year$month??-$alias.*");
+
+    unless (@files)
+    {
+        app->log->warn('No article for comment found');
+        $c->render(message => 'What?');
+        return;
+    }
+
+    if (@files > 1) {
+        app->log->warn('More then one article is available');
+    }
+
+    my $article = File::Basename::basename($files[0]);
+
+    post_comment($article, $content, $markup, \%opt) or die;
+
+    $c->redirect_to('article');
+} => 'comment';
 
 sub theme {
     my $publicdir = app->home->rel_dir($config->{publicdir});
@@ -314,7 +453,7 @@ sub _read_config_from_file {
 
     # Additional Perl modules
     if ($config->{perl5lib}) {
-        push @INC, $_
+        unshift @INC, $_
           for (
             ref $config->{perl5lib} eq 'ARRAY'
             ? @{$config->{perl5lib}}
@@ -361,26 +500,24 @@ sub _load_plugins {
 }
 
 sub _is_modified {
-    my $self = shift;
+    my $c = shift;
     my ($last_modified) = @_;
 
-    my $date = $self->req->headers->header('If-Modified-Since');
+    my $date = $c->req->headers->header('If-Modified-Since');
     return 1 unless $date;
 
     return 1 unless Mojo::Date->new($date)->epoch == $last_modified;
 
-    $self->res->code(304);
-    $self->stash(rendered => 1);
+    $c->res->code(304);
+    $c->stash(rendered => 1);
 
     return 0;
 }
 
 sub get_tags {
-    my $self = shift;
-
     my $tags = {};
 
-    my ($articles) = get_articles($self, limit => 0);
+    my ($articles) = get_articles(limit => 0);
 
     foreach my $article (@$articles) {
         foreach my $tag (@{$article->{tags}}) {
@@ -393,7 +530,6 @@ sub get_tags {
 }
 
 sub get_articles {
-    my $self = shift;
     my %params = @_;
     $params{limit} ||= 0;
 
@@ -441,7 +577,7 @@ sub get_articles {
 
     my @articles;
     foreach my $file (@files) {
-        my $data = _parse_article($self, $file);
+        my $data = _parse_article($file);
         next unless $data && %$data;
 
         push @articles, $data;
@@ -451,7 +587,6 @@ sub get_articles {
 }
 
 sub get_article {
-    my $self = shift;
     my $articleid = shift;
     return unless $articleid;
 
@@ -471,13 +606,13 @@ sub get_article {
 
     my $path;
 
-    my ($prev, $next);
+    my ($prev, $next, $basename);
     for (my $i = 0; $i <= $#files; $i++) {
         utf8::decode($files[$i]);
         $prev = $files[$i - 1] if $i > 0;
         $next = $files[$i + 1] if $i <= $#files;
 
-        my $basename = File::Basename::basename($files[$i]);
+        $basename = File::Basename::basename($files[$i]);
         if ($basename =~ m/$timestamp_re/) {
             $path = $files[$i];
             last;
@@ -489,18 +624,20 @@ sub get_article {
     my $pager = {};
 
     if ($next && $next ne $path) {
-        ($pager->{next}) = _parse_article($self, $next);
+        ($pager->{next}) = _parse_article($next);
     }
 
     if ($prev && $prev ne $path) {
-        ($pager->{prev}) = _parse_article($self, $prev);
+        ($pager->{prev}) = _parse_article($prev);
     }
 
-    return (_parse_article($self, $path), $pager);
+    my $article = _parse_article($path);
+    $article->{comments} = get_comments($basename);
+
+    return ($article, $pager);
 }
 
 sub get_draft {
-    my $self = shift;
     my $alias = shift;
     return unless $alias;
 
@@ -518,11 +655,10 @@ sub get_draft {
     my $path = $files[0];
     return unless $path && -r $path;
 
-    return _parse_article($self, $path);
+    return _parse_article($path);
 }
 
 sub get_page {
-    my $self = shift;
     my $pageid = shift;
     return unless $pageid;
 
@@ -540,11 +676,75 @@ sub get_page {
     my $path = $files[0];
     return unless $path && -r $path;
 
-    return _parse_article($self, $path);
+    return _parse_article($path);
+}
+
+sub get_comments {
+    my $article = shift;
+    return unless $article;
+
+    my $root =
+    ($config->{commentsdir} =~ m/^\//)
+        ? $config->{commentsdir}
+        : app->home->rel_dir($config->{commentsdir});
+
+    my @files = glob ($root . '/' . $article . '/*.*');
+
+    return [ map { _parse_article($_) } reverse @files ];
+}
+
+sub post_comment {
+    my $article = shift;
+    my $content = shift;
+    my $markup = shift;
+    my $opt = shift;
+
+
+    my $root =
+    ($config->{commentsdir} =~ m/^\//)
+        ? $config->{commentsdir}
+        : app->home->rel_dir($config->{commentsdir});
+
+    my $comment_dir = $root .'/'. $article;
+
+    my $t = Time::Piece->localtime;
+   
+    my $pre = $t->strftime($comment_dir .'/%Y%m%d%-H%M%S');
+
+    my ($path, $i);
+    do {
+        $path = sprintf '%s_%02d.'.$markup, $pre, $i++;
+        if ($i>99) {
+           app->log->error('something went terrible wrong');
+           return;
+        }
+    } until (! -e $path);
+
+    unless (-d $comment_dir)
+    {
+        unless (mkdir $comment_dir)
+        {
+            app->log->error("could not mkdir $comment_dir: $!");
+            return
+        }
+    }
+
+    unless (open FILE, '>encoding(UTF-8)', $path)
+    {
+        app->log->error("could not open $path");
+        return
+    }
+
+    for (keys %$opt) {
+        print FILE "$_: $opt->{$_}\n" if $opt->{$_}
+    }
+
+    print FILE "\n", $content;
+    close FILE and return 1;
 }
 
 sub url {
-    my $self = shift;
+    my $c = shift;
     my $name = shift;
     my $value = shift;
 
@@ -552,34 +752,43 @@ sub url {
         return '';
     }
     elsif ($name eq 'root') {
-        return $self->url_for(index => (format => '', @_));
+        return $c->url_for(index => (format => '', @_));
     }
     elsif ($name eq 'index') {
-        return $self->url_for(index => ($value, @_));
+        return $c->url_for(index => ($value, @_));
     }
     elsif ($name eq 'article') {
-        return $self->url_for(
+        return $c->url_for(
             article => (
                 year   => $value->{year},
                 month  => $value->{month},
                 alias  => $value->{name},
                 format => 'html'
             )
-        );
+        )
     }
     elsif ($name eq 'tag') {
-        return $self->url_for(tag => (tag => $value, format => 'html', @_));
+        return $c->url_for(tag => (tag => $value, format => 'html', @_));
     }
     elsif ($name eq 'pager') {
-        return $self->url_for('index', format => 'html')
+        return $c->url_for('index', format => 'html')
           . "?timestamp=$value";
+    }
+    elsif ($name eq 'comment') {
+        return $c->url_for(
+            comment => (
+                year   => $value->{year},
+                month  => $value->{month},
+                alias  => $value->{name},
+            )
+        )
     }
 }
 
 sub url_abs { url(@_)->to_abs }
 
 sub date {
-    my $self = shift;
+    my $c = shift;
     my $epoch = shift;
     my $fmt = shift;
 
@@ -591,7 +800,7 @@ sub date {
 }
 
 sub date_rss {
-    my $self = shift;
+    my $c = shift;
     my $epoch = shift;
 
     return Mojo::Date->new($epoch)->to_string;
@@ -599,7 +808,6 @@ sub date_rss {
 
 my %_articles;
 sub _parse_article {
-    my $self = shift;
     my $path = shift;
     return unless $path;
 
@@ -646,8 +854,12 @@ sub _parse_article {
         return;
     }
 
-    my $string = _slurp_file($path);
-    return unless defined $string;
+    unless (open FILE, "<:encoding(UTF-8)", $path) {
+        app->log->error("Can't open file: $path: $!");
+        return;
+    }
+    my $string = join("", <FILE>);
+    close FILE;
 
     my $parser = _get_parser($ext);
     return unless $parser;
@@ -662,21 +874,17 @@ sub _parse_article {
         $preview_link = $2 || $config->{cuttext};
     }
 
-    $head = $parser->($self, $head);
-    app->log->debug('Error while parsing ' . $metadata->{title}), return
-      unless defined $head;
-    $tail = $parser->($self, $tail) if $tail;
-
-    my ($preview, $content);
-
-    if ($tail) {
-        $content = $head . '<a name="cut"></a>' . $tail;
-        $preview = $head;
+    my $data = $parser->($head, $tail);
+    unless ($data) {
+        app->log->debug("Ignoring $path: parser error");
+        return;
     }
-    else {
-        $content = $head;
-        $preview = '';
-    }
+
+    my $content =
+        $data->{tail}
+      ? $data->{head} . '<a name="cut"></a>' . $data->{tail}
+      : $data->{head};
+    my $preview = $data->{tail} ? $data->{head} : '';
 
     return $_articles{$path} = {
         path            => $path,
@@ -687,10 +895,15 @@ sub _parse_article {
         year            => $year,
         month           => $month,
         day             => $day,
+        hour            => $hour,
+        minute          => $minute,
+        second          => $second,
         title           => $metadata->{title} || $name,
         description     => $metadata->{description} || '',
         link            => $metadata->{link} || '',
         tags            => $metadata->{tags} || [],
+        author          => $metadata->{author} || '',
+        mail            => $metadata->{mail} || '',
         preview         => $preview,
         preview_link    => $preview_link,
         content         => $content,
@@ -698,22 +911,61 @@ sub _parse_article {
     };
 }
 
-sub _slurp_file {
-    my $file = shift;
-
-    open my $fh, '<:encoding(UTF-8)', $file or return;
-    return do { local $/; <$fh> };
-}
-
 my %_parsers;
 sub _get_parser {
     my $ext = shift;
 
-    return \&_parse_pod if $ext eq 'pod';
+    my $parser = \&_parse_article_pod;
+    if ($ext eq 'ep') {
+        $parser = sub {
+            my ($head_string, $tail_string) = @_;
 
-    return \&_parse_md if $ext eq 'md' && MARKDOWN;
+            my $head  = '';
+            my $tail  = '';
 
-    return;
+            my $mt = Mojo::Template->new;
+
+            $head = $mt->render($head_string);
+
+            if ($tail_string) {
+                $tail = $mt->render($tail_string);
+            }
+
+            return {
+                head  => $head,
+                tail  => $tail
+            };
+          }
+    }
+    elsif ($ext ne 'pod') {
+        my $parser_class =
+          'Bootylicious::Parser::' . Mojo::ByteStream->new($ext)->camelize;
+
+        if ($_parsers{$parser_class}) {
+            $parser = $_parsers{$parser_class};
+        }
+        else {
+            eval "require $parser_class";
+            if ($@) {
+                app->log->error($@);
+                return;
+            }
+            #my $loader = Mojo::Loader->new;
+            #if (my $e = $loader->load($parser_class)) {
+                #if (ref $e) {
+                    #$c->app->log->error($e);
+                #}
+                #else {
+                    #$c->app->log->error("Unknown parser: $parser_class");
+                #}
+                #return;
+            #}
+
+            $parser = $_parsers{$parser_class} = $parser_class->new->parser_cb;
+        }
+    }
+
+    return $parser;
 }
 
 sub _parse_metadata {
@@ -746,12 +998,69 @@ sub _parse_metadata {
     return $metadata;
 }
 
-sub _parse_pod { $_[0]->helper(pod_to_html => $_[1]) }
-sub _parse_md { Text::Markdown->new->markdown($_[1]) }
+sub _parse_article_pod {
+    my ($head_string, $tail_string) = @_;
+
+    my $parser = Pod::Simple::HTML->new;
+
+    $parser->force_title('');
+    $parser->html_header_before_title('');
+    $parser->html_header_after_title('');
+    $parser->html_footer('');
+
+    my $title = '';
+    my $head  = '';
+    my $tail  = '';
+
+    $parser->output_string(\$head);
+    $head_string = "=pod\n\n$head_string";
+    eval { $parser->parse_string_document($head_string) };
+    return if $@;
+
+    # Hacking
+    $head =~ s{<a name='___top' class='dummyTopAnchor'\s*></a>\n}{}g;
+    $head =~ s{<a class='u'.*?name=".*?"\s*>(.*?)</a>}{$1}sg;
+    $head =~ s{^\s*<h1>NAME</h1>\s*<p>(.*?)</p>}{}sg;
+    $title = $1;
+
+    if ($tail_string) {
+        $tail_string = "=pod\n$tail_string";
+        my $parser = Pod::Simple::HTML->new;
+
+        $parser->force_title('');
+        $parser->html_header_before_title('');
+        $parser->html_header_after_title('');
+        $parser->html_footer('');
+
+        $parser->output_string(\$tail);
+        eval { $parser->parse_string_document($tail_string) };
+        return if $@;
+
+        $tail =~ s{<a name='___top' class='dummyTopAnchor'\s*></a>\n}{}g;
+        $tail =~ s{<a class='u'.*?name=".*?"\s*>(.*?)</a>}{$1}sg;
+    }
+
+    my $link = '';
+    if ($head =~ s{^\s*<h1>LINK</h1>\s*<p>(.*?)</p>}{}sg) {
+        $link = $1;
+    }
+
+    my $tags = [];
+    if ($head =~ s{^\s*<h1>TAGS</h1>\s*<p>(.*?)</p>}{}sg) {
+        my $list = $1; $list =~ s/(?:\r|\n)*//gs;
+        @$tags = map { s/^\s+//; s/\s+$//; $_ } split(/,/, $list);
+    }
+
+    return {
+        title => $title,
+        link  => $link,
+        tags  => $tags,
+        head  => $head,
+        tail  => $tail
+    };
+}
 
 theme if $config->{'theme'};
-
-shagadelic(@ARGV ? @ARGV : $config->{'server'});
 
 1;
 
@@ -759,11 +1068,6 @@ __DATA__
 
 @@ index.html.ep
 % stash description => config('descr');
-% if (!@{$articles}) {
-<div class="text center">
-Nothing here yet :(
-</div>
-% }
 % foreach my $article (@{$articles}) {
     <div class="text">
         <h1 class="title">
@@ -952,6 +1256,43 @@ rkJggg==" alt="RSS" /></a></sup>
       |&nbsp;<a href="<%= url article => $pager->{next} %>"><%= $pager->{next}->{title}%></a> &rarr;
 % }
     </div>
+    <div id="comments">
+    <h1>New Comment</h1>
+    <form action="<%= url comment => $article %>" method="POST">
+        <label for="author">Name</label><input type="text" name="author" /><br/>
+        <label for="mail">Mail</label><input type="text" name="mail" /><br/>
+        <label for="link">Homepage</label><input type="text" name="link" /><br/>
+        <label for="radio">Markup</label>
+% my $i = 'checked'; foreach my $markup (@{ config('commentsmarkup') }) {
+            <input type="radio" name="markup" value="<%= $markup %>" <%= $i %>/> <%= $markup %>
+%   $i = '';
+% }
+        <br/>
+        <label for="content">Comment</label><textarea name="content"></textarea><br/>
+        <input type="submit" /><br/>
+    </form>
+% if (@{$article->{comments}}) {
+    <h1>Comments</h1>
+%   foreach my $comment (@{$article->{comments}}) {
+        <div class="comment">
+            <span class="author">
+% if ($comment->{mail}) {
+                <a href="mailto:<%= $comment->{mail} %>">
+                    <%= $comment->{author} %>
+                </a>
+% } else {
+                <%= $comment->{author} %>
+% }
+            </span>
+% if ($comment->{link}) {
+            <span class="link"><a href="<%= $comment->{link} %>">WWW</a></span>
+% }
+            <span class="modified"><%= date $comment->{modified}, "%a, %d %b %Y %H:%M" %></span>
+            <div class="text comment"><%== $comment->{content} =%></div>
+        </div>
+%   }
+% }
+    </div>
 </div>
 
 
@@ -989,9 +1330,20 @@ rkJggg==" alt="RSS" /></a></sup>
 <h1>500</h1>
 <br />
 <%= strings 'error' %>
+<%= $error %>
 </div>
 
+@@ comment.html.ep
+% stash title => 'Comment', layout => 'wrapper';
+<div class="message">
+<h1>Comment:</h1>
+<br />
+<%= $message %>
+</div>
+
+
 @@ layouts/wrapper.html.ep
+%# $c->res->headers->content_type('text/html; charset=utf-8');
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
     "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
 
@@ -1035,14 +1387,17 @@ rkJggg==" alt="RSS" /></a></sup>
             .tags{margin-left:10px;text-transform:uppercase;}
             .text {padding:2em;}
             .text h1.title {font-size:2.5em}
-            .error {padding:2em;text-align:center}
+            .error,.message {padding:2em;text-align:center}
             .more {margin-left:10px}
             #pager {text-align:center;padding:2em}
             #pager span.notactive {color:#ccc}
             #subfooter {padding:2em;border-top:#000000 1px solid}
             #footer{width:65%;margin:auto;font-size:80%;text-align:center;padding:2em 0em 2em 0em;border-top:#000000 1px solid;height:2em;}
-            .center {text-align:center}
             .push {height:6em}
+            .comment .text {border-top: 1px solid black;border-left: 1px solid black;margin-bottom: 2em;}
+            #comments label {float:left; width:8em}
+            #comments input[type="text"] {width:20em}
+            #comments textarea {height:8em; width:20em;}
         </style>
 % }
         <link rel="alternate" type="application/rss+xml" title="<%= config 'title' %>" href="<%= url_abs 'index', format => 'rss' %>" />

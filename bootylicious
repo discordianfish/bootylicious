@@ -52,7 +52,7 @@ my $config = {
     meta      => [],
     css       => [],
     js        => [],
-    commentsmarkup => [ 'bb', 'pod' ],
+    commentsmarkup => [ 'bb' ],
     datefmt   => '%a, %d %b %Y',
     strings   => {
         'archive'             => 'Archive',
@@ -1134,12 +1134,15 @@ rkJggg==" alt="RSS" /></a></sup>
         <label for="author">Name</label><input type="text" name="author" /><br/>
         <label for="mail">Mail</label><input type="text" name="mail" /><br/>
         <label for="link">Homepage</label><input type="text" name="link" /><br/>
+% if (@{ config('commentsmarkup') } > 1) {
         <label for="radio">Markup</label>
-% my $i = 'checked'; foreach my $markup (@{ config('commentsmarkup') }) {
+%   my $i = 'checked';
+%   foreach my $markup (@{ config('commentsmarkup') }) {
             <input type="radio" name="markup" value="<%= $markup %>" <%= $i %>/> <%= $markup %>
-%   $i = '';
-% }
+%       $i = '';
+%   }
         <br/>
+% }
         <label for="content">Comment</label><textarea name="content"></textarea><br/>
         <input type="submit" /><br/>
     </form>

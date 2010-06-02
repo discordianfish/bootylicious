@@ -533,6 +533,7 @@ sub get_articles {
     foreach my $file (@files) {
         my $data = _parse_article($self, $file);
         next unless $data && %$data;
+        $data->{comments} = get_comments($self, File::Basename::basename $file);
 
         push @articles, $data;
     }
@@ -972,6 +973,7 @@ Nothing here yet :(
 %   else {
         <%== $article->{content} %>
 %   }
+    <a href="<%= url article => $article %>#comments"><%= length @{ $article->{comments} } || [] %> Comments</a>
     </div>
 % }
     <div id="pager">
@@ -987,6 +989,7 @@ Nothing here yet :(
 % else {
         <span class="notactive"><%= strings 'earlier' %> &rarr;</span>
 % }
+        <a href="<%= url article => $article %>#comments"><%= @{ $article->{comments} } || 0 %> Comments</a>
     </div>
 
 
@@ -1126,7 +1129,7 @@ rkJggg==" alt="RSS" /></a></sup>
 % }
     </div>
     <div id="comments">
-    <h1>New Comment</h1>
+    <a name="comments"><h1>New Comment</h1></a>
     <form action="<%= url comment => $article %>" method="POST">
         <label for="author">Name</label><input type="text" name="author" /><br/>
         <label for="mail">Mail</label><input type="text" name="mail" /><br/>

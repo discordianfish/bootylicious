@@ -142,6 +142,16 @@ app->renderer->add_helper(
         return $self->helper(link_to => 'index' => {timestamp => $timestamp, format => 'html'} => @_);
     }
 );
+app->renderer->add_helper(
+    link_to_comments => sub {
+        my $self = shift;
+        my $article = shift;
+
+        my $href = $self->helper('href_to_article' => $article);
+        
+       return $self->helper(link_to => $href => sub { @{ $article->{comments} } . ' comments' } );
+   }
+);
 
 # Helpers for plugins
 #app->renderer->add_helper(get_articles => sub { get_articles(@_) });
@@ -423,7 +433,6 @@ post '/comment/:year/:month/:alias' => sub {
     }
 
 
-    # app->log->warn("$article_root/$year$month??$alias.*");
     my @files = glob("$article_root/$year$month??-$alias.*");
 
     unless (@files)
@@ -436,7 +445,6 @@ post '/comment/:year/:month/:alias' => sub {
     if (@files > 1) {
         app->log->warn('More then one article is available');
     }
-
     my $article = File::Basename::basename($files[0]);
 
     post_comment($article, $content, $markup, \%opt) or die;
@@ -743,19 +751,18 @@ sub post_comment {
             return
         }
     }
-
-    unless (open FILE, '>encoding(UTF-8)', $path)
+    my $fh;
+    unless (open $fh, '>encoding(UTF-8)', $path)
     {
         app->log->error("could not open $path");
         return
     }
 
     for (keys %$opt) {
-        print FILE "$_: $opt->{$_}\n" if $opt->{$_}
+        print $fh "$_: $opt->{$_}\n" if $opt->{$_}
     }
-
-    print FILE "\n", $content;
-    close FILE and return 1;
+    print $fh "\n", $content;
+    close $fh and return 1;
 }
 
 sub url {
@@ -1016,7 +1023,7 @@ __DATA__
 %   else {
         <%== $article->{content} %>
 %   }
-    <a href="<%= url article => $article %>#comments"><%= length @{ $article->{comments} || [] } %> Comments</a>
+    <%= link_to_comments $article %>
     </div>
 % }
     <div id="pager">
@@ -1032,7 +1039,7 @@ __DATA__
 % else {
         <span class="notactive"><%= strings 'earlier' %> &rarr;</span>
 % }
-        <a href="<%= url article => $article %>#comments"><%= @{ $article->{comments}  || [] } %> Comments</a>
+        <%= link_to_comments $article %>
     </div>
 
 
@@ -1165,7 +1172,7 @@ rkJggg==" alt="RSS" /><%}%></sup>
     </div>
     <div id="comments">
     <a name="comments"><h1>New Comment</h1></a>
-    <form action="<%= url comment => $article %>" method="POST">
+    <form action="<%= url_for('comment', comment => $article) %>" method="POST">
         <label for="author">Name</label><input type="text" name="author" /><br/>
         <label for="mail">Mail</label><input type="text" name="mail" /><br/>
         <label for="link">Homepage</label><input type="text" name="link" /><br/>

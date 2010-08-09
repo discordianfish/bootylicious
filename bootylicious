@@ -14,7 +14,8 @@ use Mojo::Template;
 use Scalar::Util qw(looks_like_number);
 require File::Basename;
 
-$ENV{LANG} = 'C';
+# Don't use set locale unless it is explicitly specified via a config file
+$ENV{LC_ALL} = 'C';
 require Time::Piece;
 require Time::Local;
 
@@ -26,7 +27,6 @@ our $VERSION = '0.910102';
 my $config = {
     perl5lib     => '',
     loglevel     => 'error',
-    server       => 'cgi',
     author       => 'whoami',
     email        => '',
     title        => 'Just another blog',
@@ -75,6 +75,7 @@ app->home->parse($ENV{BOOTYLICIOUS_HOME}) if $ENV{BOOTYLICIOUS_HOME};
 
 _read_config_from_file();
 
+plugin 'tag_helpers';
 plugin charset => {charset => 'utf-8'};
 plugin 'pod_renderer';
 
@@ -85,8 +86,62 @@ app->renderer->default_handler(config('template_handler'));
 app->renderer->add_helper(config   => sub { shift; config(@_) });
 app->renderer->add_helper(date     => \&date);
 app->renderer->add_helper(date_rss => \&date_rss);
-app->renderer->add_helper(url      => \&url);
-app->renderer->add_helper(url_abs  => \&url_abs);
+app->renderer->add_helper(
+    href_to_article => sub {
+        my $self    = shift;
+        my $article = shift;
+
+        return $self->url_for(
+            article => (
+                year   => $article->{year},
+                month  => $article->{month},
+                alias  => $article->{name},
+                format => 'html'
+            )
+        );
+    }
+);
+app->renderer->add_helper(
+    link_to_article => sub {
+        my $self    = shift;
+        my $article = shift;
+
+        my $href = $self->helper('href_to_article' => $article);
+
+        if ($article->{link}) {
+            my $string = '';
+
+            $string
+              .= $self->helper(link_to => $href => sub { $article->{title} });
+            $string .= '&nbsp;';
+            $string .= $self->helper(link_to => $article->{link} => sub { "&raquo;" });
+
+            return Mojo::ByteStream->new($string);
+        }
+
+        return $self->helper(link_to => $href => sub { $article->{title} });
+    }
+);
+app->renderer->add_helper(
+    link_to_tag => sub {
+        my $self = shift;
+        my $tag  = shift;
+
+        my $cb = ref $_[-1] eq 'CODE' ? $_[-1] : sub {$tag};
+        my $args = ref $_[0] eq 'HASH' ? $_[0] : {};
+
+        return $self->helper(
+            link_to => tag => {tag => $tag, format => 'html', %$args} => $cb);
+    }
+);
+app->renderer->add_helper(
+    link_to_page => sub {
+        my $self      = shift;
+        my $timestamp = shift;
+
+        return $self->helper(link_to => 'index' => {timestamp => $timestamp, format => 'html'} => @_);
+    }
+);
 
 # Helpers for plugins
 #app->renderer->add_helper(get_articles => sub { get_articles(@_) });
@@ -118,12 +173,13 @@ sub config {
     return $config;
 }
 
-ladder sub {
+under sub {
     my $self = shift;
 
     my $path = $self->req->url->path;
 
-    return 1 if $self->stash->{format};
+    my $format = $self->stash->{format};
+    return 1 if $format && $format ne 'html';
 
     return 1 unless $path;
 
@@ -145,7 +201,7 @@ ladder sub {
 sub index {
     my $self = shift;
 
-    my $timestamp = $self->req->param('timestamp') || 0;
+    my $timestamp = $self->stash('timestamp') || 0;
 
     my $article = {};
     my ($articles, $pager) =
@@ -184,7 +240,7 @@ sub index {
 }
 
 get '/' => \&index => 'root';
-get '/index' => \&index => 'index';
+get '/index/:timestamp' => {timestamp => ''} => \&index => 'index';
 
 get '/archive' => sub {
     my $self = shift;
@@ -925,7 +981,7 @@ sub _parse_bb { Parse::BBCode->new->render($_[1]) }
 
 theme if $config->{'theme'};
 
-shagadelic(@ARGV ? @ARGV : $config->{'server'});
+app->start;
 
 1;
 
@@ -934,38 +990,25 @@ __DATA__
 @@ index.html.ep
 % stash description => config('descr');
 % if (!@{$articles}) {
-<div class="text center">
-Nothing here yet :(
-</div>
+    <div class="text center">
+        Nothing here yet :(
+    </div>
 % }
 % foreach my $article (@{$articles}) {
     <div class="text">
         <h1 class="title">
-%           if ($article->{link}) {
-            &raquo;
-            <a href="<%= $article->{link} %>">
-                <%= $article->{title} %>
-            </a>&nbsp;
-            <a href="<%= url article => $article %>" title="Permalink to '<%= $article->{title} %>'">
-                &#x2605;
-            </a>
-%           }
-%           else {
-            <a href="<%= url article => $article %>">
-                <%= $article->{title} %>
-            </a>
-%           }
+            <%= link_to_article $article %>
         </h1>
         <div class="created"><%= date $article->{created} %></div>
         <div class="tags">
 %   foreach my $tag (@{$article->{tags}}) {
-            <a href="<%= url tag => $tag %>"><%= $tag %></a>
+            <%= link_to_tag $tag %>
 %   }
         </div>
 %   if ($article->{preview}) {
         <%== $article->{preview} %>
         <div class="more"> &rarr;
-            <a href="<%= url article => $article %>#cut">
+            <a href="<%= href_to_article $article %>#cut">
                 <%= $article->{preview_link} %>
             </a>
         </div>
@@ -978,13 +1021,13 @@ Nothing here yet :(
 % }
     <div id="pager">
 % if ($pager->{prev}) {
-        &larr; <a href="<%= url pager => $pager->{prev} %>"><%= strings 'later' %></a>
+        &larr; <%= link_to_page $pager->{prev} => {%><%= strings 'later' %><%}%>
 % }
 % else {
         <span class="notactive">&larr; <%= strings 'later' %></span>
 % }
 % if ($pager->{next}) {
-        <a href="<%= url pager => $pager->{next} %>"><%= strings 'earlier' %></a> &rarr;
+        <%= link_to_page $pager->{next} => {%><%= strings 'earlier' %><%}%> &rarr;
 % }
 % else {
         <span class="notactive"><%= strings 'earlier' %> &rarr;</span>
@@ -1008,9 +1051,7 @@ Nothing here yet :(
     <ul>
 %     }
     <li>
-        <a href="<%= url article => $article %>">
-            <%= $article->{title} %>
-        </a>
+        <%= link_to_article $article %>
         <br />
         <div class="created"><%= date $article->{created} %></div>
     </li>
@@ -1022,17 +1063,17 @@ Nothing here yet :(
 
 @@ index.rss.ep
 <?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xml:base="<%= url_abs 'root' %>"
+<rss version="2.0" xml:base="<%= url_for('root')->to_abs %>"
     xmlns:dc="http://purl.org/dc/elements/1.1/">
     <channel>
         <title><%= config 'title' %></title>
-        <link><%= url_abs 'root' %></link>
+        <link><%= url_for('root')->to_abs %></link>
         <description><%= config 'descr' %></description>
         <pubDate><%= date_rss $last_created %></pubDate>
         <lastBuildDate><%= date_rss $last_created %></lastBuildDate>
         <generator>Mojolicious::Lite</generator>
 % foreach my $article (@$articles) {
-% my $link = url_abs(article => $article);
+% my $link = href_to_article $article;
     <item>
       <title><%= $article->{title} %></title>
       <link><%= $link %></link>
@@ -1061,7 +1102,7 @@ Nothing here yet :(
     <br />
     <div class="tags">
 % foreach my $tag (keys %$tags) {
-        <a href="<%= url tag => $tag %>"><%= $tag %></a>
+        <%= link_to_tag $tag %>
         <sub>(<%= $tags->{$tag}->{count} %>)</sub>
 % }
     </div>
@@ -1072,7 +1113,9 @@ Nothing here yet :(
 % stash title => $tag, description => strings('tag-description', $tag);
 <div class="text">
 <h1><%= strings 'tag' %> <%= $tag %>
-<sup><a href="<%= url tag => $tag, format => 'rss' %>"><img src="data:image/png;base64,
+<sup>
+<%= link_to_tag $tag => { format => 'rss'} => {%>
+<img src="data:image/png;base64,
 iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJ
 bWFnZVJlYWR5ccllPAAAAlJJREFUeNqkU0toU0EUPfPJtOZDm9gSPzWVKloXgiCCInXTRTZVQcSN
 LtyF6qILFwoVV+7EjR9oFy7VlSAVF+ouqMWWqCCIrbYSosaARNGmSV7ee+OdyUsMogtx4HBn5t1z
@@ -1085,13 +1128,11 @@ is+BvRPQ0fXE9eC7Lvy/Cfi5G8DSQ7DkTrCxKbrgJPSTS5TUDQwfgWvIBO0Dvv+bgPFAz12Dzl4E
 rXtuDWtWtQwWiliScFapQJedKxKsVFA0KezVUeMvprcfHDkua6uRzqsylQ2hE2ZPqXAld+/tTfIg
 I56VgNG1SDkuhmIb+3tELCLRTYYpRdVDFpwgCJL2fJfXFufLS4Xl6v3z7zBvXkdqUxjJc8M4tC2C
 fdDoNe62XPaCaOEBVOjbm++YnSphpuSiZAR6CFQS4h//ZJJD7acAAwCdOg/D5ZiZiQAAAABJRU5E
-rkJggg==" alt="RSS" /></a></sup>
+rkJggg==" alt="RSS" /><%}%></sup>
 </h1>
 <br />
 % foreach my $article (@$articles) {
-        <a href="<%= url article => $article %>">
-            <%= $article->{title} %>
-        </a>
+        <%= link_to_article $article %>
         <br />
         <div class="created"><%= date $article->{created} %></div>
 % }
@@ -1101,13 +1142,7 @@ rkJggg==" alt="RSS" /></a></sup>
 @@ article.html.ep
 % stash title => $article->{title}, description => $article->{description};
 <div class="text">
-<h1 class="title">
-% if ($article->{link}) {
-    &raquo; <a href="<%= $article->{link} %>"><%= $article->{title} %></a>
-% } else {
-    <%= $article->{title} %>
-% }
-</h1>
+<h1 class="title"><%= link_to_article $article %></h1>
 <div class="created"><%= date $article->{created} %>
 % if ($article->{created} != $article->{modified}) {
 , modified <span class="modified"><%= date $article->{modified} %></span>
@@ -1115,17 +1150,17 @@ rkJggg==" alt="RSS" /></a></sup>
 </div>
 <div class="tags">
 % foreach my $tag (@{$article->{tags}}) {
-    <a href="<%= url tag => $tag %>"><%= $tag %></a>
+    <%= link_to_tag $tag %>
 % }
 </div>
 <%== $article->{content} %>
     <div id="pager">
 % if ($pager->{prev}) {
-        &larr; <a href="<%= url article => $pager->{prev} %>"><%= $pager->{prev}->{title} %></a>&nbsp;|
+        &larr; <%= link_to_article $pager->{prev} %> &nbsp;|
 % }
 <a href="<%= url_for 'archive' %>"><%= strings('archive') %></a>
 % if ($pager->{next}) {
-      |&nbsp;<a href="<%= url article => $pager->{next} %>"><%= $pager->{next}->{title}%></a> &rarr;
+      |&nbsp;<%= link_to_article $pager->{next} %> &rarr;
 % }
     </div>
     <div id="comments">
@@ -1273,13 +1308,14 @@ rkJggg==" alt="RSS" /></a></sup>
             #comments textarea {height:8em; width:20em;}
         </style>
 % }
-        <link rel="alternate" type="application/rss+xml" title="<%= config 'title' %>" href="<%= url_abs 'index', format => 'rss' %>" />
+        <link rel="alternate" type="application/rss+xml" title="<%= config 'title' %>" href="<%= url_for('index', format => 'rss')->to_abs %>" />
     </head>
     <body>
         <div id="body">
             <div id="header">
-                <h1 id="title"><a href="<%= url 'root' %>"><%= config 'title' %></a>
-                <sup><a href="<%= url 'index', format => 'rss' %>"><img src="data:image/png;base64,
+                <h1 id="title">
+                <%= link_to 'root' => {%><%= config 'title' %><%}%>
+                <sup><a href="<%= url_for 'index', format => 'rss' %>"><img src="data:image/png;base64,
 iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJ
 bWFnZVJlYWR5ccllPAAAAlJJREFUeNqkU0toU0EUPfPJtOZDm9gSPzWVKloXgiCCInXTRTZVQcSN
 LtyF6qILFwoVV+7EjR9oFy7VlSAVF+ouqMWWqCCIrbYSosaARNGmSV7ee+OdyUsMogtx4HBn5t1z
@@ -1341,7 +1377,7 @@ when you add new plugins, templates, css files etc.
     * static pages
     * drafts
     * themes
-    * multi-parser support
+    * multi-parser support (POD, Markdown)
     * plugins
 
 =back
@@ -1350,7 +1386,7 @@ when you add new plugins, templates, css files etc.
 
 Bootylicious can be configured through config file that is placed in the same
 directory as C<bootylicious> (or set via BOOTYLICIOUS_HOME env variable) file
-and is called C<bootylicious.conf>. It is in JSON format.
+and is called C<bootylicious.json>. It is in JSON format.
 
     {
         "title" : "my blog title",
@@ -1480,7 +1516,7 @@ The title may contain dots (".") or dashes ("-") freely.
 =head2 PAGES
 
 These are static pages that don't appear on articles page and can be used to
-show some static information like documentation, download are, author info etc.
+show some static information like documentation, download area, author info etc.
 
 =head2 DRAFTS
 
@@ -1564,7 +1600,7 @@ Viacheslav Tykhanovskyi, C<viacheslav.t@gmail.com>.
 
 =head1 COPYRIGHT
 
-Copyright (C) 2008-2009, Viacheslav Tykhanovskyi.
+Copyright (C) 2008-2010, Viacheslav Tykhanovskyi.
 
 This program is free software, you can redistribute it and/or modify it under
 the same terms as Perl 5.10.

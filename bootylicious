@@ -418,9 +418,11 @@ post '/comment/:year/:month/:alias' => sub {
     $opt{author} = "anonymous" unless $opt{author};
 
 
-    my $markup = (
-        grep { $self->req->param('markup') eq $_ } @{ config('commentsmarkup') }
-    )[0];
+    my $markup;
+    $markup = (
+        grep { $self->req->param('markup') eq $_ }
+            @{ config('commentsmarkup') }
+    )[0] if $self->req->param('markup');
 
     $markup = @{ config('commentsmarkup') }[0] unless $markup;
     
@@ -434,8 +436,7 @@ post '/comment/:year/:month/:alias' => sub {
 
     my @files = glob("$article_root/$year$month??-$alias.*");
 
-    unless (@files)
-    {
+    unless (@files) {
         app->log->warn('No article for comment found');
         $self->render(message => 'What?');
         return;
@@ -743,6 +744,7 @@ sub post_comment {
 
     unless (-d $comment_dir)
     {
+        mkdir $root unless -d $root;
         unless (mkdir $comment_dir)
         {
             app->log->error("could not mkdir $comment_dir: $!");

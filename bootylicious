@@ -149,7 +149,7 @@ app->renderer->add_helper(
 
         my $href = $self->helper('href_to_article' => $article);
         
-       return $self->helper(link_to => $href => sub { @{ $article->{comments} } . ' comments' } );
+       return $self->helper(link_to => $href => sub { @{ $article->{comments} || [] }  . ' comments' } );
    }
 );
 

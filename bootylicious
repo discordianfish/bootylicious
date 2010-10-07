@@ -878,10 +878,17 @@ sub _parse_article {
     }
 
     my $string = _slurp_file($path);
-    return unless defined $string;
+    unless (defined $string) {
+        app->log->warn("Ignoring $path: empty or unreadable file");
+        return
+    }
 
     my $parser = _get_parser($ext);
-    return unless $parser;
+    unless ($parser)
+    {
+        app->log->warn("Ignoring $path: could not get parser for $ext");
+        return
+    }
 
     my $metadata = _parse_metadata(\$string);
 
